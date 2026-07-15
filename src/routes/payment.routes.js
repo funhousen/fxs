@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const paymentController = require('../controllers/payment.controller');
-const { requireApiKey } = require('../middleware/auth');
+const { requireMerchantAuth } = require('../middleware/auth');
 
-// Merchant-authenticated
-router.post('/stk-push', requireApiKey, paymentController.initiateStkPush);
-router.get('/status/:transactionId', requireApiKey, paymentController.getStatus);
+// Merchant-authenticated (JWT dashboard session or API key)
+router.post('/stk-push', requireMerchantAuth, paymentController.initiateStkPush);
+router.get('/status/:transactionId', requireMerchantAuth, paymentController.getStatus);
+router.get('/transactions', requireMerchantAuth, paymentController.listTransactions);
 
 // Public — human-facing receipt link
 router.get('/receipt/:transactionId', paymentController.getReceipt);
