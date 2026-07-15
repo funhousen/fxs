@@ -9,6 +9,7 @@ const merchantRoutes = require('./routes/merchant.routes');
 const walletRoutes = require('./routes/wallet.routes');
 const paymentRoutes = require('./routes/payment.routes');
 const webhookRoutes = require('./routes/webhook.routes');
+const adminRoutes = require('./routes/admin.routes');
 const { retryFailedWebhooks } = require('./services/webhook.service');
 
 const app = express();
@@ -28,6 +29,7 @@ app.use('/api/merchant', merchantRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/mpesa', paymentRoutes);
 app.use('/api/webhook', webhookRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

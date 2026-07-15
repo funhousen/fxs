@@ -62,4 +62,21 @@ async function requireApiKey(req, res, next) {
   return res.status(401).json({ error: 'Invalid API key' });
 }
 
-module.exports = { requireJwt, requireApiKey };
+/**
+ * requireAdminSecret — minimal protection for admin-only endpoints until a
+ * real admin dashboard with its own accounts/roles exists. Expects header:
+ * X-Admin-Secret: <value matching ADMIN_SECRET env var>
+ */
+function requireAdminSecret(req, res, next) {
+  const provided = req.headers['x-admin-secret'];
+
+  if (!process.env.ADMIN_SECRET) {
+    return res.status(500).json({ error: 'ADMIN_SECRET is not configured on the server' });
+  }
+  if (!provided || provided !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Invalid admin secret' });
+  }
+  next();
+}
+
+module.exports = { requireJwt, requireApiKey, requireAdminSecret };
