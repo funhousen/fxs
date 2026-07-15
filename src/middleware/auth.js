@@ -79,4 +79,31 @@ function requireAdminSecret(req, res, next) {
   next();
 }
 
-module.exports = { requireJwt, requireApiKey, requireAdminSecret };
+/**
+ * requireMerchantAuth — accepts EITHER a JWT (dashboard session) OR an API
+ * key. Lets the merchant dashboard use its own login session for wallet/
+ * payment actions without needing a separate API key, while external
+ * integrations still authenticate with fxs_live_/fxs_test_ keys.
+ */
+async function requireMerchantAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Missing bearer token' });
+  }
+
+  if (token.startsWith('fxs_live_') || token.startsWith('fxs_test_')) {
+    return requireApiKey(req, res, next);
+  }
+
+  try {
+    const payload = verifyToken(token);
+    req.merchantId = payload.sub;
+    return next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+module.exports = { requireJwt, requireApiKey, requireAdminSecret, requireMerchantAuth };
