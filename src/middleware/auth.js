@@ -1,0 +1,65 @@
+const { verifyToken } = require('../utils/jwt');
+const { verifyApiKey } = require('../utils/apikey');
+const supabase = require('../config/supabase');
+
+/**
+ * requireJwt — for the merchant dashboard (login session).
+ */
+function requireJwt(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Missing bearer token' });
+  }
+
+  try {
+    const payload = verifyToken(token);
+    req.merchantId = payload.sub;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+/**
+ * requireApiKey — for developer/API integrations (server-to-server calls).
+ * Expects header: Authorization: Bearer fxs_live_xxx or fxs_test_xxx
+ */
+async function requireApiKey(req, res, next) {
+  const header = req.headers.authorization || '';
+  const fullKey = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!fullKey || !(fullKey.startsWith('fxs_live_') || fullKey.startsWith('fxs_test_'))) {
+    return res.status(401).json({ error: 'Missing or malformed API key' });
+  }
+
+  const prefix = fullKey.startsWith('fxs_live_') ? 'fxs_live_' : 'fxs_test_';
+
+  const { data: candidates, error } = await supabase
+    .from('merchant_api_keys')
+    .select('id, merchant_id, key_hash, is_active')
+    .eq('key_prefix', prefix)
+    .eq('is_active', true);
+
+  if (error) {
+    return res.status(500).json({ error: 'Auth lookup failed' });
+  }
+
+  for (const candidate of candidates || []) {
+    const isMatch = await verifyApiKey(fullKey, candidate.key_hash);
+    if (isMatch) {
+      req.merchantId = candidate.merchant_id;
+      supabase
+        .from('merchant_api_keys')
+        .update({ last_used_at: new Date().toISOString() })
+        .eq('id', candidate.id)
+        .then(() => {});
+      return next();
+    }
+  }
+
+  return res.status(401).json({ error: 'Invalid API key' });
+}
+
+module.exports = { requireJwt, requireApiKey };
