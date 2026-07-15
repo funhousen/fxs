@@ -203,4 +203,22 @@ async function getReceipt(req, res) {
   `);
 }
 
-module.exports = { initiateStkPush, handleWebhook, getStatus, getReceipt };
+/**
+ * GET /api/mpesa/transactions
+ * Recent transaction history for the merchant dashboard.
+ */
+async function listTransactions(req, res) {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+
+  const { data: transactions, error } = await supabase
+    .from('transactions')
+    .select('id, type, method, amount, currency, status, reference, customer_phone, description, created_at')
+    .eq('merchant_id', req.merchantId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ transactions });
+}
+
+module.exports = { initiateStkPush, handleWebhook, getStatus, getReceipt, listTransactions };

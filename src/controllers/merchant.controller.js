@@ -163,4 +163,19 @@ async function deleteAccount(req, res) {
   return res.status(204).send();
 }
 
-module.exports = { register, login, getProfile, updateProfile, createApiKey, deleteAccount };
+/**
+ * GET /api/merchant/api-keys — lists metadata only, never the actual secret
+ * (which is only ever shown once, at creation time).
+ */
+async function listApiKeys(req, res) {
+  const { data: keys, error } = await supabase
+    .from('merchant_api_keys')
+    .select('id, key_prefix, label, is_active, created_at, last_used_at')
+    .eq('merchant_id', req.merchantId)
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ keys });
+}
+
+module.exports = { register, login, getProfile, updateProfile, createApiKey, listApiKeys, deleteAccount };
