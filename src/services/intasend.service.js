@@ -24,7 +24,7 @@ function authHeaders() {
 async function initiateStkPush({ phone, amount, apiRef, narrative, email }) {
   const payload = {
     public_key: process.env.INTASEND_PUBLISHABLE_KEY,
-    method: 'MPESA_STK_PUSH',
+    method: 'M-PESA',
     amount,
     phone_number: phone,
     api_ref: apiRef,
