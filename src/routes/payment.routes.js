@@ -11,8 +11,9 @@ router.get('/transactions', requireMerchantAuth, paymentController.listTransacti
 // Public — human-facing receipt link
 router.get('/receipt/:transactionId', paymentController.getReceipt);
 
-// Public — IntaSend calls this directly, no auth header will be present.
-// Verified instead via the `challenge` field checked inside the controller.
-router.post('/webhook', express.json(), paymentController.handleWebhook);
+// Public — Paystack calls this directly. Signature verification uses
+// req.rawBody, captured globally in server.js's express.json() verify
+// callback — see the note there for why express.raw() alone isn't used.
+router.post('/webhook', paymentController.handleWebhook);
 
 module.exports = router;
