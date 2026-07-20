@@ -1,15 +1,14 @@
 const supabase = require('../config/supabase');
-const intasend = require('../services/intasend.service');
+const paystack = require('../services/paystack.service');
 const ledgerService = require('../services/ledger.service');
 const webhookService = require('../services/webhook.service');
 
 /**
  * POST /api/mpesa/stk-push
- * Merchant-initiated deposit request. FXS Pay talks to IntaSend only —
- * IntaSend is the one holding the Safaricom/Daraja relationship.
+ * Merchant-initiated deposit request, routed through Paystack's Charge API.
  */
 async function initiateStkPush(req, res) {
-  const { phone, amount, accountReference, description } = req.body;
+  const { phone, amount, accountReference, description, email } = req.body;
 
   if (!phone || !amount || amount <= 0) {
     return res.status(400).json({ error: 'phone and a positive amount are required' });
@@ -37,81 +36,71 @@ async function initiateStkPush(req, res) {
 
     if (error) throw error;
 
-    // api_ref carries our own transaction id, so the webhook can match back
-    // to this exact row even if IntaSend's invoice id lookup were to miss.
-    const result = await intasend.initiateStkPush({
+    // Our own transaction id IS the Paystack reference — one field to match on,
+    // no separate invoice id to reconcile like with IntaSend.
+    const result = await paystack.initiateMpesaCharge({
       phone,
       amount,
-      apiRef: transaction.id,
-      narrative: description,
+      reference: transaction.id,
+      narration: description,
+      email,
     });
-
-    const invoiceId = result?.invoice?.invoice_id || result?.invoice?.id;
 
     await supabase
       .from('transactions')
-      .update({ provider_reference: invoiceId })
+      .update({ provider_reference: result.data.reference })
       .eq('id', transaction.id);
 
     return res.status(202).json({
-      message: 'STK push sent via IntaSend. Await customer confirmation.',
+      message: 'STK push sent via Paystack. Await customer confirmation.',
       transactionId: transaction.id,
-      invoiceId,
+      paystackStatus: result.data.status,
     });
   } catch (err) {
-    const message = err.response?.data?.detail || err.response?.data || err.message;
-    return res.status(502).json({ error: `IntaSend request failed: ${JSON.stringify(message)}` });
+    const message = err.response?.data?.message || err.message;
+    return res.status(502).json({ error: `Paystack request failed: ${message}` });
   }
 }
 
 /**
  * POST /api/mpesa/webhook
- * Public — IntaSend calls this directly. Configure this URL in your
- * IntaSend dashboard under Settings -> Webhooks, along with a challenge
- * string that must match INTASEND_WEBHOOK_CHALLENGE.
+ * Public — Paystack calls this directly. Configure this URL in your
+ * Paystack dashboard under Settings -> API Keys & Webhooks.
+ * NOTE: this route must receive the RAW body (express.raw in payment.routes.js),
+ * not JSON-parsed, because the signature is computed over the raw bytes.
  */
 async function handleWebhook(req, res) {
-  if (!intasend.verifyWebhookChallenge(req.body)) {
-    return res.status(401).json({ error: 'Invalid webhook challenge' });
+  const signature = req.headers['x-paystack-signature'];
+
+  if (!signature || !req.rawBody || !paystack.verifyWebhookSignature(req.rawBody, signature)) {
+    return res.status(401).json({ error: 'Invalid webhook signature' });
   }
 
-  const event = intasend.parseInvoiceEvent(req.body);
+  const event = paystack.parseWebhookEvent(req.body);
 
-  // Match primarily on our own transaction id (sent as api_ref), falling
-  // back to IntaSend's invoice id for cases we didn't initiate ourselves
-  // (e.g. a customer paying via an IntaSend-hosted payment link/Paybill).
-  let transaction = null;
-
-  if (event.apiRef) {
-    const { data } = await supabase.from('transactions').select('*').eq('id', event.apiRef).maybeSingle();
-    transaction = data;
-  }
-  if (!transaction && event.invoiceId) {
-    const { data } = await supabase
-      .from('transactions')
-      .select('*')
-      .eq('provider_reference', event.invoiceId)
-      .maybeSingle();
-    transaction = data;
-  }
+  const { data: transaction } = await supabase
+    .from('transactions')
+    .select('*')
+    .eq('id', event.reference)
+    .maybeSingle();
 
   if (!transaction) {
-    console.error('IntaSend webhook for unrecognized transaction:', event);
+    console.error('Paystack webhook for unrecognized transaction:', event);
     return res.status(200).json({ received: true });
   }
 
-  // Idempotency — IntaSend may resend the same webhook.
+  // Idempotency — Paystack can resend the same webhook.
   if (transaction.status === 'success' || transaction.status === 'failed') {
     return res.status(200).json({ received: true });
   }
 
-  if (event.state === 'COMPLETE') {
+  if (event.event === 'charge.success' && event.status === 'success') {
     await supabase
       .from('transactions')
       .update({
         status: 'success',
-        provider_reference: event.invoiceId,
-        metadata: { provider: event.provider },
+        provider_reference: event.reference,
+        metadata: { channel: event.channel, gatewayResponse: event.gatewayResponse },
       })
       .eq('id', transaction.id);
 
@@ -121,28 +110,28 @@ async function handleWebhook(req, res) {
       transactionId: transaction.id,
       amount: transaction.amount,
       currency: transaction.currency,
-      invoiceId: event.invoiceId,
+      paystackReference: event.reference,
       receiptUrl: `${process.env.BASE_URL}/api/mpesa/receipt/${transaction.id}`,
     });
-  } else if (event.state === 'FAILED') {
+  } else if (event.event === 'charge.failed' || event.status === 'failed') {
     await supabase
       .from('transactions')
-      .update({ status: 'failed', metadata: { reason: event.failedReason } })
+      .update({ status: 'failed', metadata: { gatewayResponse: event.gatewayResponse } })
       .eq('id', transaction.id);
 
     await webhookService.dispatchEvent(transaction.merchant_id, 'payment.failed', {
       transactionId: transaction.id,
-      reason: event.failedReason,
+      reason: event.gatewayResponse,
     });
   }
-  // PENDING events just acknowledge without changing anything yet.
+  // Other events (e.g. still pending) just acknowledge without changing state.
 
   return res.status(200).json({ received: true });
 }
 
 /**
  * GET /api/mpesa/status/:transactionId
- * Checks our own DB first; if still pending, polls IntaSend directly as a
+ * Checks our own DB first; if still pending, polls Paystack directly as a
  * fallback in case the webhook hasn't arrived yet.
  */
 async function getStatus(req, res) {
@@ -157,20 +146,38 @@ async function getStatus(req, res) {
 
   if (transaction.status === 'pending' && transaction.provider_reference) {
     try {
-      const live = await intasend.checkStatus(transaction.provider_reference);
-      const event = intasend.parseInvoiceEvent(live);
-      if (event.state === 'COMPLETE' && transaction.status !== 'success') {
+      const live = await paystack.verifyTransaction(transaction.provider_reference);
+      if (live.data.status === 'success' && transaction.status !== 'success') {
         await ledgerService.creditWallet(transaction.wallet_id, transaction.id, transaction.amount);
         await supabase.from('transactions').update({ status: 'success' }).eq('id', transaction.id);
         transaction.status = 'success';
+      } else if (live.data.status === 'failed' || live.data.status === 'abandoned') {
+        await supabase.from('transactions').update({ status: 'failed' }).eq('id', transaction.id);
+        transaction.status = 'failed';
       }
     } catch (err) {
-      // Non-fatal — just return the last known local status.
-      console.error('IntaSend status poll failed:', err.message);
+      console.error('Paystack status poll failed:', err.message);
     }
   }
 
   return res.json({ transaction });
+}
+
+/**
+ * GET /api/mpesa/transactions
+ */
+async function listTransactions(req, res) {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+
+  const { data: transactions, error } = await supabase
+    .from('transactions')
+    .select('id, type, method, amount, currency, status, reference, customer_phone, description, created_at')
+    .eq('merchant_id', req.merchantId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ transactions });
 }
 
 /**
@@ -201,24 +208,6 @@ async function getReceipt(req, res) {
       </body>
     </html>
   `);
-}
-
-/**
- * GET /api/mpesa/transactions
- * Recent transaction history for the merchant dashboard.
- */
-async function listTransactions(req, res) {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
-
-  const { data: transactions, error } = await supabase
-    .from('transactions')
-    .select('id, type, method, amount, currency, status, reference, customer_phone, description, created_at')
-    .eq('merchant_id', req.merchantId)
-    .order('created_at', { ascending: false })
-    .limit(limit);
-
-  if (error) return res.status(500).json({ error: error.message });
-  return res.json({ transactions });
 }
 
 module.exports = { initiateStkPush, handleWebhook, getStatus, getReceipt, listTransactions };
