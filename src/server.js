@@ -17,7 +17,14 @@ const app = express();
 app.use(helmet());
 app.use(cors());
 app.use(morgan('combined'));
-app.use(express.json({ limit: '1mb' }));
+// Captures the raw request body bytes alongside normal JSON parsing.
+// Needed because Paystack's webhook signature (X-Paystack-Signature) is an
+// HMAC over the exact raw bytes sent — re-serializing req.body with
+// JSON.stringify would not byte-for-byte match what Paystack signed.
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
 
 // Basic rate limiting — tune per-route limits (e.g. tighter on /login) as you grow.
 const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 100 });
